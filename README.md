@@ -40,8 +40,11 @@ Claude is closed with SIGTERM, which Electron handles the same way as Cmd+Q.
 - Switching quits Claude, which stops any active Code and Cowork sessions.
 - If you run `seat use` from inside Claude (for example, from the Code tab), the switch
   happens in the background. Log: `Claude Profiles/.seat.log`.
-- Each profile has its own Cowork virtual machine: the first time you start Cowork
-  in a new profile, it's downloaded again (~10 GB of disk space).
+- Each profile has its own Cowork virtual machine (`vm_bundles` in the profile folder):
+  the first time you start Cowork in a profile, Claude downloads about 1.3 GB and unpacks
+  it to about 12 GB on disk, and it updates each profile's copy separately. The VM isn't
+  tied to an account; it's per-profile only because seat swaps Claude's whole data folder.
+  A profile removed with `seat rm` keeps taking up that space until you empty the Trash.
 - Don't launch a second Claude instance (`open -n`): it would use the same profile folder.
 
 ## Install
