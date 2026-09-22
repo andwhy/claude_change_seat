@@ -1,19 +1,19 @@
 #!/bin/zsh -f
-# seat — переключение аккаунтов Claude Desktop без повторного входа.
+# seat — switch Claude Desktop accounts without signing in again.
 #
-# Всё, что привязано к аккаунту (куки, токены, чаты Code и Cowork, MCP-конфиг),
-# Claude Desktop хранит в одной папке: ~/Library/Application Support/Claude.
-# Релизная сборка не даёт подменить её переменной окружения, поэтому seat
-# меняет папки местами, пока Claude закрыт: активный профиль лежит на
-# стандартном пути, остальные ждут рядом в «Claude Profiles». Это переименование
-# в пределах одного диска — мгновенно и без копирования.
-# ~/.claude (настройки и история Claude Code) общий для всех профилей.
+# Claude Desktop keeps everything tied to an account (cookies, tokens, Code and
+# Cowork chats, MCP config) in one folder: ~/Library/Application Support/Claude.
+# The release build can't be pointed at another folder with an environment
+# variable, so seat swaps folders while Claude is closed: the active profile
+# sits at the standard path, the others wait next to it in "Claude Profiles".
+# The swap is a rename on the same volume, so it's instant and copies nothing.
+# ~/.claude (Claude Code settings and history) is shared by all profiles.
 
 emulate -R zsh
 setopt pipe_fail
 PATH=/usr/bin:/bin:/usr/sbin:/sbin:$PATH
 
-# Переменные SEAT_* нужны только для тестов.
+# The SEAT_* variables exist only for tests.
 LIVE=${SEAT_LIVE_DIR:-$HOME/Library/Application Support/Claude}
 STORE=${SEAT_STORE_DIR:-$HOME/Library/Application Support/Claude Profiles}
 TRASH=${SEAT_TRASH_DIR:-$HOME/.Trash}
@@ -24,17 +24,17 @@ SELF=${0:A}
 
 usage() {
   cat <<'EOF'
-seat — переключение аккаунтов Claude Desktop
+seat — switch Claude Desktop accounts
 
-  seat                        список профилей
-  seat add <имя>              создать пустой профиль
-  seat use <имя>              переключиться: Claude закроется и откроется с этим профилем
-  seat rename <имя> <новое>   переименовать профиль
-  seat rm <имя> [-y]          удалить профиль (в Корзину)
-  seat current                имя активного профиля
+  seat                        list profiles
+  seat add <name>             create an empty profile
+  seat use <name>             switch: Claude quits and reopens with this profile
+  seat rename <old> <new>     rename a profile
+  seat rm <name> [-y]         delete a profile (moves it to the Trash)
+  seat current                print the active profile's name
 
-До первого переключения текущие данные Claude считаются профилем «default».
-В новом профиле нужно один раз войти в аккаунт, дальше seat переключает без входа.
+Until the first switch, Claude's current data counts as the "default" profile.
+Sign in once in each new profile; after that, seat switches without signing in.
 EOF
 }
 
@@ -44,13 +44,13 @@ die()  { fail "$@"; exit 1; }
 
 check_name() {
   local re='^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'
-  [[ $1 =~ $re ]] || die "недопустимое имя «$1»: латиница, цифры, «.», «_» и «-»"
+  [[ $1 =~ $re ]] || die "invalid name '$1': use only ASCII letters, digits, '.', '_' and '-'"
 }
 
-ensure_store() { mkdir -p -m 700 -- "$STORE" || die "не удалось создать «$STORE»"; }
+ensure_store() { mkdir -p -m 700 -- "$STORE" || die "failed to create '$STORE'"; }
 
-# Имя профиля, который сейчас лежит на стандартном пути. Папка без метки —
-# это данные Claude до первого переключения, то есть «default».
+# Name of the profile currently at the standard path. A folder without a marker
+# holds Claude's data from before the first switch, i.e. "default".
 active_name() {
   [[ -d $LIVE ]] || return 1
   local name=""
@@ -64,8 +64,8 @@ parked_names() {
   for d in "$STORE"/*(N/); do say "${d:t}"; done
 }
 
-# PID главного процесса Claude, без хелперов. Флаг -a обязателен: по умолчанию
-# pgrep пропускает своих предков, а seat может быть запущен изнутри Claude.
+# PIDs of Claude's main process, without the helpers. The -a flag is required:
+# by default pgrep skips its own ancestors, and seat may be running inside Claude.
 app_pids() {
   local pid
   for pid in $(pgrep -a -x "$APP"); do
@@ -73,7 +73,7 @@ app_pids() {
   done
 }
 
-# Запущен ли seat из самого Claude, например из вкладки Code.
+# Whether seat was started from inside Claude itself, e.g. from the Code tab.
 inside_app() {
   local -a pids=(${(f)"$(app_pids)"})
   (( ${#pids} )) || return 1
@@ -86,34 +86,34 @@ inside_app() {
   return 1
 }
 
-# Закрывает Claude сигналом SIGTERM: Electron обрабатывает его как обычный
-# выход по Cmd+Q, с сохранением состояния. Но перехватывает он только первый
-# SIGTERM, второй убивает процесс сразу. Поэтому PID, которым уже отправили
-# сигнал, запоминаем и больше не трогаем.
+# Quits Claude with SIGTERM: Electron handles it like a normal Cmd+Q quit and
+# saves its state. But it only intercepts the first SIGTERM; a second one kills
+# the process outright. So PIDs that have already been signaled are recorded
+# and never signaled again.
 quit_app() {
   local -a pids=(${(f)"$(app_pids)"})
   (( ${#pids} )) || return 0
   local sent=$STORE/.seat-signaled p i
   for p in $pids; do
     if grep -qx -- $p "$sent" 2>/dev/null; then
-      fail "Claude уже получал команду выхода и не закрылся (возможно, ждёт ответа в диалоге). Закрой его через Cmd+Q и повтори."
+      fail "Claude was already told to quit but didn't close (it may be waiting for an answer in a dialog). Quit it with Cmd+Q and try again."
       return 1
     fi
   done
   print -l -- $pids >>"$sent"
-  say "Закрываю Claude…"
+  say "Quitting Claude…"
   kill -TERM $pids 2>/dev/null
   for (( i = 0; i < 240; i++ )); do
     [[ -z $(app_pids) ]] && { rm -f -- "$sent"; return 0; }
     sleep 0.25
   done
-  fail "Claude не закрылся за минуту. Если он что-то спрашивает, ответь или закрой его через Cmd+Q, потом повтори."
+  fail "Claude didn't quit within a minute. If it's asking you something, answer it or quit it with Cmd+Q, then try again."
 }
 
-# Хелперы Claude и всё, что запущено из папки профиля (например, сессии
-# Claude Code). Пока они живы, папку трогать нельзя. Обработчик крэш-репортов
-# живёт отдельно от приложения и может пережить его; ему переименование
-# папки не мешает, поэтому его не ждём.
+# Claude's helpers and anything launched from the profile folder (e.g. Claude
+# Code sessions). While they're running, the folder must not be touched. The
+# crash report handler runs separately from the app and can outlive it; renaming
+# the folder doesn't affect it, so we don't wait for it.
 busy_procs() {
   ps -axo pid=,comm= | grep -F -e "/$APP.app/Contents/" -e "$LIVE/" | grep -v -F chrome_crashpad_handler
 }
@@ -124,66 +124,66 @@ wait_quiet() {
     [[ -z $(busy_procs) ]] && return 0
     sleep 0.25
   done
-  fail "после закрытия Claude остались процессы, которые используют папку профиля:"$'\n'"$(busy_procs)"
+  fail "Claude has quit, but these processes are still using the profile folder:"$'\n'"$(busy_procs)"
 }
 
-# Кладёт активный профиль на полку и ставит на его место выбранный.
+# Parks the active profile in the store and moves the chosen one into its place.
 swap_to() {
   local target=$1 active=""
   if [[ -d $LIVE ]]; then
     active=$(active_name)
     if [[ -e $STORE/$active ]]; then
-      fail "не могу убрать «$active»: «$STORE/$active» уже существует"
+      fail "can't move '$active' aside: '$STORE/$active' already exists"
       return 1
     fi
     [[ -f $LIVE/$MARKER ]] || print -r -- $active >"$LIVE/$MARKER" || return 1
-    mv -- "$LIVE" "$STORE/$active" || { fail "не удалось убрать профиль «$active»"; return 1; }
+    mv -- "$LIVE" "$STORE/$active" || { fail "failed to move profile '$active' aside"; return 1; }
   fi
-  # Если на стандартном пути уже есть папка, mv положил бы профиль внутрь неё.
+  # If a folder is already at the standard path, mv would move the profile into it.
   if [[ -e $LIVE ]] || ! mv -- "$STORE/$target" "$LIVE"; then
     if [[ -n $active && ! -e $LIVE ]] && mv -- "$STORE/$active" "$LIVE"; then
-      fail "не удалось поставить профиль «$target», вернул «$active» на место"
+      fail "failed to put profile '$target' in place; restored '$active'"
     else
-      fail "не удалось поставить профиль «$target»; проверь «$LIVE» и «$STORE»"
+      fail "failed to put profile '$target' in place; check '$LIVE' and '$STORE'"
     fi
     return 1
   fi
 }
 
 launch_app() {
-  open -b "$BUNDLE_ID" || { fail "не удалось запустить Claude"; return 1; }
+  open -b "$BUNDLE_ID" || { fail "failed to launch Claude"; return 1; }
   local i
   for (( i = 0; i < 80; i++ )); do
     [[ -n $(app_pids) ]] && return 0
     sleep 0.25
   done
-  fail "Claude не запустился за 20 секунд, открой его вручную"
+  fail "Claude didn't start within 20 seconds; open it manually"
 }
 
 do_switch() {
   local target=$1 fresh=""
   [[ -e $STORE/$target/Cookies ]] || fresh=1
   quit_app || return 1
-  # Не вышло поменять папки — открываем Claude с прежним профилем.
+  # If the folders couldn't be swapped, reopen Claude with the previous profile.
   if ! wait_quiet || ! swap_to $target; then
     launch_app
     return 1
   fi
   launch_app || return 1
-  say "Готово: Claude открыт с профилем «$target»."
-  [[ -n $fresh ]] && say "Профиль новый, войди в аккаунт. Дальше seat будет переключать без входа."
+  say "Done: Claude is open with profile '$target'."
+  [[ -n $fresh ]] && say "This is a new profile, so sign in. From then on, seat will switch without signing in."
   return 0
 }
 
-# Изнутри Claude переключаться напрямую нельзя: закрывая Claude, seat убил бы
-# сам себя. Поэтому работу доделывает отвязанный процесс в собственной сессии
-# (setsid), а вывод уходит в лог.
+# Switching directly from inside Claude won't work: by quitting Claude, seat
+# would kill itself. So a detached process in its own session (setsid) finishes
+# the job, and its output goes to a log.
 switch_detached() {
-  command -v perl >/dev/null || die "для переключения изнутри Claude нужен perl; запусти seat из обычного терминала"
+  command -v perl >/dev/null || die "switching from inside Claude requires perl; run seat from a regular terminal"
   local log=$STORE/.seat.log
   nohup perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' "$SELF" __switch $1 </dev/null >>"$log" 2>&1 &!
-  say "seat запущен изнутри Claude, поэтому переключаюсь в фоне: через пару секунд Claude закроется и откроется с профилем «$1»."
-  say "Лог: $log"
+  say "seat is running inside Claude, so it will switch in the background: in a couple of seconds Claude will quit and reopen with profile '$1'."
+  say "Log: $log"
 }
 
 cmd_list() {
@@ -192,13 +192,13 @@ cmd_list() {
   local -a names=(${(f)"$(parked_names)"})
   [[ -n $active ]] && names+=($active)
   if (( ! ${#names} )); then
-    say "Профилей пока нет. Создать: seat add <имя>"
+    say "No profiles yet. Create one: seat add <name>"
     return
   fi
   [[ -n $(app_pids) ]] && running=1
   for name in ${(ou)names}; do
     if [[ $name == "$active" ]]; then
-      say "* $name  (активный${running:+, Claude запущен})"
+      say "* $name  (active${running:+, Claude is running})"
     else
       say "  $name"
     fi
@@ -207,30 +207,30 @@ cmd_list() {
 
 cmd_add() {
   local name=${1:-}
-  [[ -n $name ]] || die "укажи имя: seat add <имя>"
+  [[ -n $name ]] || die "specify a name: seat add <name>"
   check_name $name
-  [[ $name == "$(active_name)" || -e $STORE/$name ]] && die "профиль «$name» уже есть"
+  [[ $name == "$(active_name)" || -e $STORE/$name ]] && die "profile '$name' already exists"
   ensure_store
-  mkdir -m 700 -- "$STORE/$name" && print -r -- $name >"$STORE/$name/$MARKER" || die "не удалось создать профиль «$name»"
-  say "Профиль «$name» создан. Переключиться: seat use $name"
+  mkdir -m 700 -- "$STORE/$name" && print -r -- $name >"$STORE/$name/$MARKER" || die "failed to create profile '$name'"
+  say "Profile '$name' created. Switch to it: seat use $name"
 }
 
 cmd_use() {
   local target=${1:-} active=""
-  [[ -n $target ]] || die "укажи профиль: seat use <имя>"
+  [[ -n $target ]] || die "specify a profile: seat use <name>"
   check_name $target
   [[ -d $LIVE ]] && active=$(active_name)
   if [[ $target == "$active" ]]; then
     if [[ -n $(app_pids) ]]; then
-      say "Профиль «$target» уже активен."
+      say "Profile '$target' is already active."
     else
       launch_app || exit 1
-      say "Claude открыт с профилем «$target»."
+      say "Claude is open with profile '$target'."
     fi
     return
   fi
-  [[ -d $STORE/$target ]] || die "профиль «$target» не найден. Создать: seat add $target"
-  [[ -n $active && -e $STORE/$active ]] && die "не могу убрать «$active»: «$STORE/$active» уже существует"
+  [[ -d $STORE/$target ]] || die "profile '$target' not found. Create it: seat add $target"
+  [[ -n $active && -e $STORE/$active ]] && die "can't move '$active' aside: '$STORE/$active' already exists"
   ensure_store
   if inside_app; then
     switch_detached $target
@@ -241,41 +241,41 @@ cmd_use() {
 
 cmd_rename() {
   local old=${1:-} new=${2:-} active=""
-  [[ -n $old && -n $new ]] || die "использование: seat rename <имя> <новое>"
+  [[ -n $old && -n $new ]] || die "usage: seat rename <old> <new>"
   check_name $old
   check_name $new
   [[ -d $LIVE ]] && active=$(active_name)
-  [[ $new == "$active" || -e $STORE/$new ]] && die "профиль «$new» уже есть"
+  [[ $new == "$active" || -e $STORE/$new ]] && die "profile '$new' already exists"
   if [[ $old == "$active" ]]; then
-    print -r -- $new >"$LIVE/$MARKER" || die "не удалось переименовать"
+    print -r -- $new >"$LIVE/$MARKER" || die "failed to rename"
   else
-    [[ -d $STORE/$old ]] || die "профиль «$old» не найден"
-    mv -- "$STORE/$old" "$STORE/$new" && print -r -- $new >"$STORE/$new/$MARKER" || die "не удалось переименовать"
+    [[ -d $STORE/$old ]] || die "profile '$old' not found"
+    mv -- "$STORE/$old" "$STORE/$new" && print -r -- $new >"$STORE/$new/$MARKER" || die "failed to rename"
   fi
-  say "Профиль «$old» теперь называется «$new»."
+  say "Profile '$old' renamed to '$new'."
 }
 
 cmd_rm() {
   local name=${1:-}
-  [[ -n $name ]] || die "укажи профиль: seat rm <имя>"
+  [[ -n $name ]] || die "specify a profile: seat rm <name>"
   check_name $name
-  [[ $name == "$(active_name)" ]] && die "«$name» сейчас активен, сначала переключись на другой профиль"
-  [[ -d $STORE/$name ]] || die "профиль «$name» не найден"
+  [[ $name == "$(active_name)" ]] && die "'$name' is active right now; switch to another profile first"
+  [[ -d $STORE/$name ]] || die "profile '$name' not found"
   if [[ ${2:-} != -y ]]; then
-    [[ -t 0 ]] || die "подтверди удаление флагом: seat rm $name -y"
-    read -q "?Удалить профиль «$name» (переместить в Корзину)? [y/N] " || { print; die "отменено"; }
+    [[ -t 0 ]] || die "confirm deletion with the -y flag: seat rm $name -y"
+    read -q "?Delete profile '$name' (move it to the Trash)? [y/N] " || { print; die "canceled"; }
     print
   fi
-  mv -- "$STORE/$name" "$TRASH/seat-$name-$(date +%Y%m%d-%H%M%S)" || die "не удалось переместить в Корзину"
-  say "Профиль «$name» перемещён в Корзину."
+  mv -- "$STORE/$name" "$TRASH/seat-$name-$(date +%Y%m%d-%H%M%S)" || die "failed to move it to the Trash"
+  say "Profile '$name' moved to the Trash."
 }
 
 cmd_current() {
-  active_name || die "нет активного профиля"
+  active_name || die "no active profile"
 }
 
 main() {
-  [[ -L $LIVE ]] && die "«$LIVE» — символическая ссылка, seat работает только с обычной папкой"
+  [[ -L $LIVE ]] && die "'$LIVE' is a symbolic link; seat only works with a regular folder"
   local cmd=${1:-list}
   (( $# )) && shift
   case $cmd in
@@ -286,7 +286,7 @@ main() {
     rm|remove)      cmd_rm "$@" ;;
     current)        cmd_current ;;
     help|-h|--help) usage ;;
-    __switch)       # фоновая часть switch_detached
+    __switch)       # background half of switch_detached
                     check_name ${1:-}
                     sleep 2
                     say "== $(date '+%F %T') → ${1}"
@@ -295,5 +295,5 @@ main() {
   esac
 }
 
-# При source (в тестах) только определяем функции.
+# When sourced (in tests), only define the functions.
 [[ $ZSH_EVAL_CONTEXT == toplevel ]] && main "$@"

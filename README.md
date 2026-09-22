@@ -1,55 +1,55 @@
 # seat
 
-Переключение аккаунтов Claude Desktop на macOS без повторного входа.
+Switch Claude Desktop accounts on macOS without signing in again.
 
 ```
-seat                        список профилей
-seat add <имя>              создать пустой профиль
-seat use <имя>              переключиться: Claude закроется и откроется с этим профилем
-seat rename <имя> <новое>   переименовать профиль
-seat rm <имя> [-y]          удалить профиль (в Корзину)
-seat current                имя активного профиля
+seat                        list profiles
+seat add <name>             create an empty profile
+seat use <name>             switch: Claude quits and reopens with this profile
+seat rename <old> <new>     rename a profile
+seat rm <name> [-y]         delete a profile (moves it to the Trash)
+seat current                print the active profile's name
 ```
 
-Первый раз:
+First-time setup:
 
 ```
-seat rename default personal   # текущие данные Claude — профиль «default»
+seat rename default personal   # your current Claude data is the "default" profile
 seat add work
-seat use work                  # войди в рабочий аккаунт один раз
-seat use personal              # обратно, без входа
+seat use work                  # sign in to your work account once
+seat use personal              # switch back, no sign-in needed
 ```
 
-## Как это работает
+## How it works
 
-Всё, что привязано к аккаунту (куки, токены, чаты Code и Cowork, настройки MCP),
-Claude Desktop хранит в `~/Library/Application Support/Claude`. Релизная сборка
-не даёт перенаправить эту папку, поэтому `seat` меняет папки местами, пока Claude закрыт:
+Claude Desktop keeps everything tied to an account (cookies, tokens, Code and Cowork
+chats, MCP settings) in `~/Library/Application Support/Claude`. The release build
+can't be pointed at another folder, so `seat` swaps folders while Claude is closed:
 
-- активный профиль лежит на стандартном пути;
-- остальные ждут в `~/Library/Application Support/Claude Profiles/<имя>`;
-- в каждом профиле есть метка `.seat-profile` с его именем.
+- the active profile sits at the standard path;
+- the others wait in `~/Library/Application Support/Claude Profiles/<name>`;
+- each profile contains a `.seat-profile` marker with its name.
 
-Переименование в пределах одного диска мгновенное, данные не копируются.
-Claude закрывается сигналом SIGTERM: Electron обрабатывает его так же, как Cmd+Q.
+A rename on the same volume is instant; no data is copied.
+Claude is closed with SIGTERM, which Electron handles the same way as Cmd+Q.
 
-`~/.claude` (настройки, скиллы и история Claude Code) общий для всех профилей.
+`~/.claude` (Claude Code settings, skills, and history) is shared by all profiles.
 
-## Что учесть
+## Caveats
 
-- При переключении Claude закрывается, активные сессии Code и Cowork останавливаются.
-- Если запустить `seat use` из самого Claude (например, из вкладки Code), переключение
-  пройдёт в фоне. Лог: `Claude Profiles/.seat.log`.
-- Виртуальная машина Cowork у каждого профиля своя: при первом запуске Cowork
-  в новом профиле она скачается заново (~10 ГБ на диске).
-- Не запускай второй экземпляр Claude (`open -n`): он откроется поверх того же профиля.
+- Switching quits Claude, which stops any active Code and Cowork sessions.
+- If you run `seat use` from inside Claude (for example, from the Code tab), the switch
+  happens in the background. Log: `Claude Profiles/.seat.log`.
+- Each profile has its own Cowork virtual machine: the first time you start Cowork
+  in a new profile, it's downloaded again (~10 GB of disk space).
+- Don't launch a second Claude instance (`open -n`): it would use the same profile folder.
 
-## Установка и удаление
+## Install and uninstall
 
 ```
 ln -s "$PWD/seat" /opt/homebrew/bin/seat
 ```
 
-Чтобы вернуть всё как было: `seat use default` (или то имя, которое ты дал
-исходному профилю), затем удалить `~/Library/Application Support/Claude Profiles`
-и ссылку `/opt/homebrew/bin/seat`.
+To undo everything: run `seat use default` (or whatever name you gave the original
+profile), then delete `~/Library/Application Support/Claude Profiles` and the
+`/opt/homebrew/bin/seat` symlink.
