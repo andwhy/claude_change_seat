@@ -44,12 +44,17 @@ Claude is closed with SIGTERM, which Electron handles the same way as Cmd+Q.
   in a new profile, it's downloaded again (~10 GB of disk space).
 - Don't launch a second Claude instance (`open -n`): it would use the same profile folder.
 
-## Install and uninstall
+## Install
 
 ```
-ln -s "$PWD/seat" /opt/homebrew/bin/seat
+brew install andwhy/tap/seat
 ```
+
+Update with `brew upgrade seat`. Without Homebrew, clone the repository and symlink
+`seat` into any folder on your `PATH`.
+
+## Uninstall
 
 To undo everything: run `seat use default` (or whatever name you gave the original
-profile), then delete `~/Library/Application Support/Claude Profiles` and the
-`/opt/homebrew/bin/seat` symlink.
+profile), delete `~/Library/Application Support/Claude Profiles`, then run
+`brew uninstall seat`.

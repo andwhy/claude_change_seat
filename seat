@@ -13,6 +13,8 @@ emulate -R zsh
 setopt pipe_fail
 PATH=/usr/bin:/bin:/usr/sbin:/sbin:$PATH
 
+VERSION=0.1.0
+
 # The SEAT_* variables exist only for tests.
 LIVE=${SEAT_LIVE_DIR:-$HOME/Library/Application Support/Claude}
 STORE=${SEAT_STORE_DIR:-$HOME/Library/Application Support/Claude Profiles}
@@ -286,6 +288,7 @@ main() {
     rm|remove)      cmd_rm "$@" ;;
     current)        cmd_current ;;
     help|-h|--help) usage ;;
+    -v|--version)   say "seat $VERSION" ;;
     __switch)       # background half of switch_detached
                     check_name ${1:-}
                     sleep 2
