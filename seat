@@ -8,14 +8,63 @@
 # sits at the standard path, the others wait next to it in "Claude Profiles".
 # The swap is a rename on the same volume, so it's instant and copies nothing.
 # ~/.claude (Claude Code settings and history) is shared by all profiles.
+#
+#   ~/Library/Application Support/
+#     Claude/                 the active profile: the folder Claude reads
+#       .seat-profile         a marker with the profile's name, e.g. "work"
+#     Claude Profiles/        created by seat
+#       personal/             a parked profile, waiting for `seat use personal`
+#         .seat-profile       "personal"
+#       .seat.log             output of switches started from inside Claude
+#       .seat-signaled        PIDs already told to quit; gone once Claude quits
+#
+# `seat use <name>` switches in four steps (see do_switch):
+#   1. quit_app    ask Claude to quit, the same way Cmd+Q does, and wait
+#   2. wait_quiet  wait until no leftover process is using the profile folder
+#   3. swap_to     park the active profile (Claude → Claude Profiles/<active>),
+#                  then bring in the new one (Claude Profiles/<name> → Claude)
+#   4. launch_app  open Claude, which finds <name>'s data at the usual path
+#
+# Everything seat touches:
+#   - Folders. It creates "Claude Profiles" and the profile folders in it, and
+#     moves profiles between the two places above; `seat rm` moves one to the
+#     Trash. Your data is never copied or deleted.
+#   - Files. It reads and writes only its own: .seat-profile, .seat.log and
+#     .seat-signaled. It never opens Claude's files; it only checks whether
+#     "Cookies" exists, to tell a new profile from a signed-in one.
+#   - Processes. It looks up Claude's processes, asks Claude to quit (SIGTERM)
+#     and opens it again.
+# It never uses the network or the Keychain, needs no sudo, doesn't modify
+# Claude.app, and no part of it keeps running after a switch.
+#
+# To follow the code, start at main() at the bottom, then read cmd_use and
+# do_switch. A note for bash readers: in zsh an unquoted $var is never split
+# into words or treated as a wildcard, and $array expands to all its elements.
+# Other zsh-specific syntax is explained where it's used.
 
+# --- Setup --------------------------------------------------------------------
+
+# A predictable shell. `zsh -f` in the first line skips your zsh startup files,
+# so nothing in them can change what seat does. emulate -R resets all options
+# to zsh defaults, and pipe_fail makes a pipeline fail when any command in it
+# fails. System folders go first in PATH, so every command below is the one
+# that ships with macOS.
 emulate -R zsh
 setopt pipe_fail
 PATH=/usr/bin:/bin:/usr/sbin:/sbin:$PATH
 
+# Must match the release tag: the Homebrew formula's test checks it.
 VERSION=0.1.0
 
-# The SEAT_* variables exist only for tests.
+# Where things live. The SEAT_* overrides exist only for tests, which point
+# seat at scratch folders and a stand-in app instead of the real Claude.
+#   LIVE       the active profile: the folder Claude reads
+#   STORE      parked profiles, one folder each
+#   TRASH      where `seat rm` moves a profile
+#   BUNDLE_ID  Claude's app ID, used to reopen it wherever it's installed
+#   APP        the name of Claude's main process
+#   MARKER     the file in each profile folder that holds the profile's name
+#   SELF       this script's absolute path (:A also resolves symlinks)
 LIVE=${SEAT_LIVE_DIR:-$HOME/Library/Application Support/Claude}
 STORE=${SEAT_STORE_DIR:-$HOME/Library/Application Support/Claude Profiles}
 TRASH=${SEAT_TRASH_DIR:-$HOME/.Trash}
@@ -23,6 +72,8 @@ BUNDLE_ID=${SEAT_BUNDLE_ID:-com.anthropic.claudefordesktop}
 APP=${SEAT_APP_NAME:-Claude}
 MARKER=.seat-profile
 SELF=${0:A}
+
+# --- Helpers ------------------------------------------------------------------
 
 usage() {
   cat <<'EOF'
@@ -40,34 +91,55 @@ Sign in once in each new profile; after that, seat switches without signing in.
 EOF
 }
 
+# Output. print -r prints text as is, without interpreting backslashes, and -u2
+# writes to stderr. fail reports an error and returns 1, so the caller can roll
+# back first; die reports it and exits.
 say()  { print -r -- "$*"; }
 fail() { print -ru2 -- "seat: $*"; return 1; }
 die()  { fail "$@"; exit 1; }
 
+# Every profile name typed on the command line passes this check before it's
+# used in a path. With no '/' and no leading '.' or '-', a name can only mean a
+# folder directly inside STORE: never "..", a path elsewhere, a hidden file or
+# an option.
 check_name() {
   local re='^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'
   [[ $1 =~ $re ]] || die "invalid name '$1': use only ASCII letters, digits, '.', '_' and '-'"
 }
 
+# Creates STORE on first use. Mode 700 keeps it private to you, like Claude's
+# own folder.
 ensure_store() { mkdir -p -m 700 -- "$STORE" || die "failed to create '$STORE'"; }
 
+# --- Profiles on disk ---------------------------------------------------------
+
 # Name of the profile currently at the standard path. A folder without a marker
-# holds Claude's data from before the first switch, i.e. "default".
+# holds Claude's data from before the first switch, i.e. "default". Fails when
+# there's no folder at all, e.g. if Claude has never been opened.
 active_name() {
   [[ -d $LIVE ]] || return 1
   local name=""
+  # $(<file) reads a file without running cat. Whitespace is dropped, so a
+  # marker edited by hand still works.
   [[ -f $LIVE/$MARKER ]] && name=$(<"$LIVE/$MARKER")
   name=${name//[[:space:]]/}
   say "${name:-default}"
 }
 
+# Names of the parked profiles, one per line: the folders inside STORE.
+# (N/) after the glob means "folders only, and no error if there are none";
+# :t keeps the last path component, like basename.
 parked_names() {
   local d
   for d in "$STORE"/*(N/); do say "${d:t}"; done
 }
 
+# --- Claude's processes -------------------------------------------------------
+
 # PIDs of Claude's main process, without the helpers. The -a flag is required:
 # by default pgrep skips its own ancestors, and seat may be running inside Claude.
+# -x matches the process name exactly, and the path check skips anything that is
+# called Claude but isn't an app's main executable (…/Contents/MacOS/Claude).
 app_pids() {
   local pid
   for pid in $(pgrep -a -x "$APP"); do
@@ -75,12 +147,15 @@ app_pids() {
   done
 }
 
-# Whether seat was started from inside Claude itself, e.g. from the Code tab.
+# Whether seat was started from inside Claude itself, e.g. from the Code tab:
+# climbs from this process up through its parents, looking for Claude's PID.
 inside_app() {
+  # ${(f)...} splits the output into an array, one element per line.
   local -a pids=(${(f)"$(app_pids)"})
   (( ${#pids} )) || return 1
   local p=$$
   while (( p > 1 )); do
+    # ${pids[(Ie)$p]} is the index of $p in the array, or 0 if it isn't there.
     (( ${pids[(Ie)$p]} )) && return 0
     p=$(ps -o ppid= -p $p) || return 1
     p=${p// /}
@@ -88,10 +163,12 @@ inside_app() {
   return 1
 }
 
-# Quits Claude with SIGTERM: Electron handles it like a normal Cmd+Q quit and
-# saves its state. But it only intercepts the first SIGTERM; a second one kills
-# the process outright. So PIDs that have already been signaled are recorded
-# and never signaled again.
+# --- Switching, step by step --------------------------------------------------
+
+# Step 1. Quits Claude with SIGTERM: Electron handles it like a normal Cmd+Q
+# quit and saves its state. But it only intercepts the first SIGTERM; a second
+# one kills the process outright. So the PIDs that were signaled are written to
+# a file, and a later run of seat refuses to signal them again.
 quit_app() {
   local -a pids=(${(f)"$(app_pids)"})
   (( ${#pids} )) || return 0
@@ -105,6 +182,7 @@ quit_app() {
   print -l -- $pids >>"$sent"
   say "Quitting Claude…"
   kill -TERM $pids 2>/dev/null
+  # Wait for up to a minute: 240 checks, a quarter of a second apart.
   for (( i = 0; i < 240; i++ )); do
     [[ -z $(app_pids) ]] && { rm -f -- "$sent"; return 0; }
     sleep 0.25
@@ -112,14 +190,16 @@ quit_app() {
   fail "Claude didn't quit within a minute. If it's asking you something, answer it or quit it with Cmd+Q, then try again."
 }
 
-# Claude's helpers and anything launched from the profile folder (e.g. Claude
-# Code sessions). While they're running, the folder must not be touched. The
-# crash report handler runs separately from the app and can outlive it; renaming
-# the folder doesn't affect it, so we don't wait for it.
+# Processes still using the profile folder, one "PID path" line each: Claude's
+# helpers and anything launched from the profile folder (e.g. Claude Code
+# sessions). While they're running, the folder must not be touched. The crash
+# report handler runs separately from the app and can outlive it; renaming the
+# folder doesn't affect it, so we don't wait for it.
 busy_procs() {
   ps -axo pid=,comm= | grep -F -e "/$APP.app/Contents/" -e "$LIVE/" | grep -v -F chrome_crashpad_handler
 }
 
+# Step 2. Waits up to a minute until busy_procs finds nothing.
 wait_quiet() {
   local i
   for (( i = 0; i < 240; i++ )); do
@@ -129,7 +209,9 @@ wait_quiet() {
   fail "Claude has quit, but these processes are still using the profile folder:"$'\n'"$(busy_procs)"
 }
 
-# Parks the active profile in the store and moves the chosen one into its place.
+# Step 3. Parks the active profile in the store and moves the chosen one into
+# its place. This is the only function that moves folders in or out of the
+# standard path. If the second move fails, it tries to put the old profile back.
 swap_to() {
   local target=$1 active=""
   if [[ -d $LIVE ]]; then
@@ -138,6 +220,8 @@ swap_to() {
       fail "can't move '$active' aside: '$STORE/$active' already exists"
       return 1
     fi
+    # Before the first switch the folder has no marker yet. Add one, so every
+    # profile carries its name.
     [[ -f $LIVE/$MARKER ]] || print -r -- $active >"$LIVE/$MARKER" || return 1
     mv -- "$LIVE" "$STORE/$active" || { fail "failed to move profile '$active' aside"; return 1; }
   fi
@@ -152,6 +236,8 @@ swap_to() {
   fi
 }
 
+# Step 4. Opens Claude by its bundle ID, wherever the app is installed, and
+# waits up to 20 seconds for its main process to appear.
 launch_app() {
   open -b "$BUNDLE_ID" || { fail "failed to launch Claude"; return 1; }
   local i
@@ -162,8 +248,11 @@ launch_app() {
   fail "Claude didn't start within 20 seconds; open it manually"
 }
 
+# The switch itself: steps 1–4 in order.
 do_switch() {
   local target=$1 fresh=""
+  # A profile that has never been signed in has no Cookies file yet. seat only
+  # checks that the file exists and never opens it.
   [[ -e $STORE/$target/Cookies ]] || fresh=1
   quit_app || return 1
   # If the folders couldn't be swapped, reopen Claude with the previous profile.
@@ -183,11 +272,18 @@ do_switch() {
 switch_detached() {
   command -v perl >/dev/null || die "switching from inside Claude requires perl; run seat from a regular terminal"
   local log=$STORE/.seat.log
+  # macOS has no setsid command, so perl calls setsid() and then replaces itself
+  # with `seat __switch <name>` (see main). nohup ignores the hangup signal, and
+  # &! starts the process in the background and disowns it, so this shell
+  # doesn't wait for it.
   nohup perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' "$SELF" __switch $1 </dev/null >>"$log" 2>&1 &!
   say "seat is running inside Claude, so it will switch in the background: in a couple of seconds Claude will quit and reopen with profile '$1'."
   say "Log: $log"
 }
 
+# --- Commands -----------------------------------------------------------------
+
+# seat, seat list: all profiles, sorted, with the active one marked by '*'.
 cmd_list() {
   local active="" name running=""
   [[ -d $LIVE ]] && active=$(active_name)
@@ -198,6 +294,7 @@ cmd_list() {
     return
   fi
   [[ -n $(app_pids) ]] && running=1
+  # (ou): sorted, without duplicates.
   for name in ${(ou)names}; do
     if [[ $name == "$active" ]]; then
       say "* $name  (active${running:+, Claude is running})"
@@ -207,6 +304,8 @@ cmd_list() {
   done
 }
 
+# seat add <name>: creates an empty parked profile. Claude fills it the first
+# time you switch to it and sign in.
 cmd_add() {
   local name=${1:-}
   [[ -n $name ]] || die "specify a name: seat add <name>"
@@ -217,11 +316,14 @@ cmd_add() {
   say "Profile '$name' created. Switch to it: seat use $name"
 }
 
+# seat use <name>: everything that can be checked is checked while Claude is
+# still running, so a switch that can't succeed doesn't quit Claude for nothing.
 cmd_use() {
   local target=${1:-} active=""
   [[ -n $target ]] || die "specify a profile: seat use <name>"
   check_name $target
   [[ -d $LIVE ]] && active=$(active_name)
+  # Already active: just make sure Claude is open.
   if [[ $target == "$active" ]]; then
     if [[ -n $(app_pids) ]]; then
       say "Profile '$target' is already active."
@@ -241,6 +343,8 @@ cmd_use() {
   fi
 }
 
+# seat rename <old> <new>: for the active profile only the marker changes; a
+# parked profile's folder is renamed too.
 cmd_rename() {
   local old=${1:-} new=${2:-} active=""
   [[ -n $old && -n $new ]] || die "usage: seat rename <old> <new>"
@@ -257,6 +361,9 @@ cmd_rename() {
   say "Profile '$old' renamed to '$new'."
 }
 
+# seat rm <name> [-y]: moves a parked profile to the Trash, under a name with
+# the date and time. Asks first unless -y is given. The active profile can't be
+# removed.
 cmd_rm() {
   local name=${1:-}
   [[ -n $name ]] || die "specify a profile: seat rm <name>"
@@ -264,6 +371,8 @@ cmd_rm() {
   [[ $name == "$(active_name)" ]] && die "'$name' is active right now; switch to another profile first"
   [[ -d $STORE/$name ]] || die "profile '$name' not found"
   if [[ ${2:-} != -y ]]; then
+    # read -q reads a single key and succeeds only for y or Y. Without a
+    # terminal there's no one to ask, so -y is required.
     [[ -t 0 ]] || die "confirm deletion with the -y flag: seat rm $name -y"
     read -q "?Delete profile '$name' (move it to the Trash)? [y/N] " || { print; die "canceled"; }
     print
@@ -272,11 +381,17 @@ cmd_rm() {
   say "Profile '$name' moved to the Trash."
 }
 
+# seat current: prints the active profile's name.
 cmd_current() {
   active_name || die "no active profile"
 }
 
+# --- Entry point --------------------------------------------------------------
+
+# Runs the subcommand; most have an alias.
 main() {
+  # A symlink here means the folder is managed some other way, and mv would move
+  # the link rather than the data. Better to stay out.
   [[ -L $LIVE ]] && die "'$LIVE' is a symbolic link; seat only works with a regular folder"
   local cmd=${1:-list}
   (( $# )) && shift
@@ -291,6 +406,8 @@ main() {
     -v|--version)   say "seat $VERSION" ;;
     __switch)       # background half of switch_detached
                     check_name ${1:-}
+                    # Give the seat that started this a moment to exit and show
+                    # its message before Claude quits.
                     sleep 2
                     say "== $(date '+%F %T') → ${1}"
                     do_switch $1 || exit 1 ;;
