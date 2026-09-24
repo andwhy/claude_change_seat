@@ -1,6 +1,37 @@
 # seat
 
-Switch Claude Desktop accounts on macOS without signing in again.
+`seat` is a tiny command-line utility for switching accounts in Claude Desktop on macOS.
+Keep your personal and work accounts signed in and switch between them with one command,
+without signing out and back in.
+
+## Small enough to read before you run it
+
+A tool that handles your Claude sign-in shouldn't need blind trust, so `seat` was built
+to be as small as possible. The whole tool is [one zsh script](seat): about 250 lines of
+code, with comments that explain every step. You can actually read all of it before you
+run it. Start with the comment at the top: it lists everything the script touches.
+
+- **It only moves folders.** A switch renames Claude's data folder while Claude is
+  closed. `seat` never opens your cookies, tokens, or chats, never touches the Keychain,
+  and doesn't modify Claude.app.
+- **No network, no `sudo`, no daemons.** It doesn't connect to anything, doesn't need
+  admin rights, and no part of it keeps running after a switch.
+- **No dependencies.** It uses only zsh and tools that come with macOS. Nothing is
+  compiled, so the code you read is exactly the code that runs.
+- **It never deletes your data.** A switch is two renames, and `seat rm` moves a profile
+  to the Trash.
+
+## Install
+
+```
+brew install andwhy/tap/seat
+```
+
+Homebrew installs the script as is, so you can read exactly what you've installed before
+the first run: `less "$(command -v seat)"`. Update with `brew upgrade seat`. Without
+Homebrew, clone the repository and symlink `seat` into any folder on your `PATH`.
+
+## Usage
 
 ```
 seat                        list profiles
@@ -46,15 +77,6 @@ Claude is closed with SIGTERM, which Electron handles the same way as Cmd+Q.
   tied to an account; it's per-profile only because seat swaps Claude's whole data folder.
   A profile removed with `seat rm` keeps taking up that space until you empty the Trash.
 - Don't launch a second Claude instance (`open -n`): it would use the same profile folder.
-
-## Install
-
-```
-brew install andwhy/tap/seat
-```
-
-Update with `brew upgrade seat`. Without Homebrew, clone the repository and symlink
-`seat` into any folder on your `PATH`.
 
 ## Uninstall
 
