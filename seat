@@ -54,7 +54,7 @@ setopt pipe_fail
 PATH=/usr/bin:/bin:/usr/sbin:/sbin:$PATH
 
 # Must match the release tag: the Homebrew formula's test checks it.
-VERSION=0.1.0
+VERSION=0.1.1
 
 # Where things live. The SEAT_* overrides exist only for tests, which point
 # seat at scratch folders and a stand-in app instead of the real Claude.
